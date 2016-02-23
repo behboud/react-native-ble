@@ -5,8 +5,10 @@
 #import "RCTCONVERT+CBUUID.h"
 
 @interface RNBLE () <CBCentralManagerDelegate, CBPeripheralDelegate> {
-	CBCentralManager    *centralManager;
-	dispatch_queue_t eventQueue;
+    CBCentralManager    *centralManager;
+    dispatch_queue_t eventQueue;
+    NSMutableDictionary *peripherals;
+    BOOL isScanning;
 }
 @end
 
@@ -21,9 +23,9 @@ RCT_EXPORT_MODULE()
 - (instancetype)init
 {
     if (self = [super init]) {
-
-	}
-	return self;
+        
+    }
+    return self;
 }
 
 RCT_EXPORT_METHOD(setup)
@@ -33,57 +35,180 @@ RCT_EXPORT_METHOD(setup)
     dispatch_set_target_queue(eventQueue, dispatch_get_main_queue());
 
     centralManager = [[CBCentralManager alloc] initWithDelegate:self queue:eventQueue options:@{}];
+    peripherals = [NSMutableDictionary new];
+    isScanning = false;
 }
 
 RCT_EXPORT_METHOD(startScanning:(CBUUIDArray *)uuids allowDuplicates:(BOOL)allowDuplicates)
 {
-//	RCTLogInfo(@"startScanning %@ %d", uuids, allowDuplicates);
+//  RCTLogInfo(@"startScanning %@ %d", uuids, allowDuplicates);
 
-	NSMutableDictionary *scanOptions = [NSMutableDictionary dictionaryWithObject:@NO
-	                                                      forKey:CBCentralManagerScanOptionAllowDuplicatesKey];
+    NSMutableDictionary *scanOptions = [NSMutableDictionary dictionaryWithObject:@NO
+                                                          forKey:CBCentralManagerScanOptionAllowDuplicatesKey];
 
-	if(allowDuplicates){
-		[scanOptions setObject:@YES forKey:CBCentralManagerScanOptionAllowDuplicatesKey];
-	}
+    if(allowDuplicates){
+        [scanOptions setObject:@YES forKey:CBCentralManagerScanOptionAllowDuplicatesKey];
+    }
 
 //    RCTLogInfo(@"startScanning %@ %@", uuids, scanOptions);
 
     [centralManager scanForPeripheralsWithServices:uuids options:scanOptions];
+    isScanning = true;
 }
 
 RCT_EXPORT_METHOD(stopScanning)
 {
-//	RCTLogInfo(@"stopScanning");
+//  RCTLogInfo(@"stopScanning");
 
-	[centralManager stopScan];
+    [centralManager stopScan];
+    isScanning = false;
 }
 
 RCT_EXPORT_METHOD(getState)
 {
    // RCTLogInfo(@"getState");
     
-    [self.bridge.eventDispatcher sendDeviceEventWithName:@"stateChange" body:[self NSStringForCBCentralManagerState:[centralManager state]]];
+    [self.bridge.eventDispatcher sendDeviceEventWithName:@"ble.stateChange" body:[self NSStringForCBCentralManagerState:[centralManager state]]];
 }
 
 - (void)centralManager:(CBCentralManager *)central didDiscoverPeripheral:(CBPeripheral *)peripheral
-			advertisementData:(NSDictionary *)advertisementData RSSI:(NSNumber *)RSSI
+            advertisementData:(NSDictionary *)advertisementData RSSI:(NSNumber *)RSSI
 {
-    
+    if (!isScanning) return;
 //    RCTLogInfo(@"didDiscoverPeripheral");
 
     
-//, @"state" : [self nameForCBPeripheralState:peripheral.state] 
-
+//, @"state" : [self nameForCBPeripheralState:peripheral.state]        [peripherals setObject:peripheral forKey:peripheral.identifier.UUIDString];
+    [peripherals setObject:peripheral forKey:peripheral.identifier.UUIDString];
     NSDictionary *advertisementDictionary = [self dictionaryForAdvertisementData:advertisementData fromPeripheral:peripheral];
     
     NSDictionary *event = @{
                             @"kCBMsgArgDeviceUUID": peripheral.identifier.UUIDString,
                             @"kCBMsgArgAdvertisementData": advertisementDictionary,
-                            @"kCBMsgArgName": @"",
+                            @"kCBMsgArgName": peripheral.name ? peripheral.name : @"",
                             @"kCBMsgArgRssi": RSSI
                             };
 
-    [self.bridge.eventDispatcher sendDeviceEventWithName:@"discover" body:event];
+    [self.bridge.eventDispatcher sendDeviceEventWithName:@"ble.discover" body:event];
+}
+
+
+RCT_EXPORT_METHOD(connect:(NSString*)peripheralUuid)
+{
+    //RCTLogInfo(@"connect");
+    CBPeripheral *peripheral = peripherals[peripheralUuid];
+    
+    [centralManager connectPeripheral:peripheral options:nil];
+}
+
+RCT_EXPORT_METHOD(disconnect:(NSString*)peripheralUuid)
+{
+    //RCTLogInfo(@"disconnect");
+    CBPeripheral *peripheral = peripherals[peripheralUuid];
+    
+    [centralManager cancelPeripheralConnection:peripheral];
+}
+
+- (void)centralManager:(CBCentralManager *)central didConnectPeripheral:(CBPeripheral *)peripheral
+{
+    peripheral.delegate = self;
+    [peripherals setObject:peripheral forKey:peripheral.identifier.UUIDString];
+    [self.bridge.eventDispatcher sendDeviceEventWithName:@"ble.connect" body:@{
+                                                                               @"peripheralUuid": peripheral.identifier.UUIDString}];
+}
+
+- (void)centralManager:(CBCentralManager *)central didDisconnectPeripheral:(CBPeripheral *)peripheral error:(NSError *)error
+{
+    [self.bridge.eventDispatcher sendDeviceEventWithName:@"ble.disconnect" body:@{
+                                                                               @"peripheralUuid": peripheral.identifier.UUIDString}];
+}
+
+RCT_EXPORT_METHOD(discoverServices:(NSString*)peripheralUuid serviceUuids:(CBUUIDArray *)serviceUuids)
+{
+    //RCTLogInfo(@"discover services");
+    CBPeripheral *peripheral = peripherals[peripheralUuid];
+    [peripheral discoverServices:serviceUuids];
+}
+
+- (void)peripheral:(CBPeripheral *)peripheral didDiscoverServices:(NSError *)error
+{
+    //RCTLogInfo(@"discovered services");
+    [peripherals setObject:peripheral forKey:peripheral.identifier.UUIDString];
+    NSMutableArray *serviceUuids = [NSMutableArray new];
+    for (CBService *service in peripheral.services) {
+        //RCTLogInfo(@"saved service uuid: %@", service.UUID.UUIDString);
+        [serviceUuids addObject:service.UUID.UUIDString];
+    }
+    [self.bridge.eventDispatcher sendDeviceEventWithName:@"ble.servicesDiscover" body:@{
+                                                                                        @"peripheralUuid": peripheral.identifier.UUIDString,
+                                                                                        @"serviceUuids": serviceUuids
+                                                                                        }];
+}
+
+RCT_EXPORT_METHOD(discoverCharacteristics:(NSString*)peripheralUuid serviceUuid:(NSString*)serviceUuid)
+{
+    //RCTLogInfo(@"discovering characteristics for %@", serviceUuid);
+    CBPeripheral *peripheral = peripherals[peripheralUuid];
+    for (CBService *service in peripheral.services) {
+        //NSLog(@"service uuid to match: %@",service.UUID.UUIDString);
+        if ([service.UUID.UUIDString isEqualToString:serviceUuid]) {
+            [peripheral discoverCharacteristics:nil forService:service];
+            break;
+        }
+    }
+}
+
+- (void)peripheral:(CBPeripheral *)peripheral didDiscoverCharacteristicsForService:(CBService *)service error:(NSError *)error
+{
+    //RCTLogInfo(@"discovered characteristics");
+    [peripherals setObject:peripheral forKey:peripheral.identifier.UUIDString];
+    NSMutableArray *characteristics = [NSMutableArray new];
+    for (CBCharacteristic *characteristic in service.characteristics) {
+        [characteristics addObject:characteristic.UUID.UUIDString];
+    }
+    [self.bridge.eventDispatcher sendDeviceEventWithName:@"ble.characteristicsDiscover" body:@{
+                                                                                        @"peripheralUuid": peripheral.identifier.UUIDString,
+                                                                                        @"serviceUuid": service.UUID.UUIDString,
+                                                                                        @"characteristicUuids": characteristics
+                                                                                        }];
+}
+
+RCT_EXPORT_METHOD(notify:(NSString*)peripheralUuid serviceUuid:(NSString*)serviceUuid characteristicUuid:(NSString*)characteristicUuid notify:(BOOL)notify)
+{
+    //RCTLogInfo(@"Notifying!");
+    CBPeripheral *peripheral = peripherals[peripheralUuid];
+    CBCharacteristic *targetCharacteristic;
+    for (CBService *service in peripheral.services) {
+        if ([service.UUID.UUIDString isEqualToString:serviceUuid]) {
+            for (CBCharacteristic *characteristic in service.characteristics) {
+                if ([characteristic.UUID.UUIDString isEqualToString:characteristicUuid]) {
+                    targetCharacteristic = characteristic;
+                    break;
+                }
+            }
+            break;
+        }
+    }
+    if (targetCharacteristic) {
+        [peripheral setNotifyValue:notify forCharacteristic:targetCharacteristic];
+    }
+}
+
+- (void)peripheral:(CBPeripheral *)peripheral didUpdateNotificationStateForCharacteristic:(CBCharacteristic *)characteristic error:(NSError *)error
+{
+    NSLog(@"Changed notification state");
+}
+
+- (void)peripheral:(CBPeripheral *)peripheral didUpdateValueForCharacteristic:(CBCharacteristic *)characteristic error:(NSError *)error
+{
+    //RCTLogInfo(@"Got some data!");
+    [self.bridge.eventDispatcher sendDeviceEventWithName:@"ble.data" body:@{
+                                                                            @"peripheralUuid": peripheral.identifier.UUIDString,
+                                                                            @"serviceUuid": characteristic.service.UUID.UUIDString,
+                                                                            @"characteristicUuid": characteristic.UUID.UUIDString,
+                                                                            @"data": [characteristic.value base64EncodedStringWithOptions:0],
+                                                                            @"isNotification": @(characteristic.isNotifying)
+                                                                            }];
 }
 
 -(NSDictionary *)dictionaryForPeripheral:(CBPeripheral*)peripheral
@@ -93,7 +218,7 @@ RCT_EXPORT_METHOD(getState)
 
 -(NSDictionary *)dictionaryForAdvertisementData:(NSDictionary*)advertisementData fromPeripheral:(CBPeripheral*)peripheral
 {
-//	RCTLogInfo(@"dictionaryForAdvertisementData %@ %@", advertisementData, peripheral);
+//  RCTLogInfo(@"dictionaryForAdvertisementData %@ %@", advertisementData, peripheral);
  
     NSString *localNameString = [advertisementData objectForKey:@"kCBAdvDataLocalName"];
     localNameString = localNameString ? localNameString : @"";
@@ -137,7 +262,7 @@ RCT_EXPORT_METHOD(getState)
 
 - (void) centralManagerDidUpdateState:(CBCentralManager *)central
 {
-    [self.bridge.eventDispatcher sendDeviceEventWithName:@"stateChange" body:[self NSStringForCBCentralManagerState:[central state]]];
+    [self.bridge.eventDispatcher sendDeviceEventWithName:@"ble.stateChange" body:[self NSStringForCBCentralManagerState:[central state]]];
 }
 
 - (NSString*) NSStringForCBCentralManagerState:(CBCentralManagerState)state{
