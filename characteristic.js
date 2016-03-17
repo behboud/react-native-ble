@@ -2,7 +2,7 @@ var debug = require('debug')('characteristic');
 
 var events = require('events');
 var util = require('util');
-
+var Buffer = require('buffer');
 var characteristics = require('./characteristics.json');
 
 function Characteristic(noble, peripheralId, serviceUuid, uuid, properties) {
